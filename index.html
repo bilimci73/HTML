@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Mobile FPS Multiplayer</title>
+
+<style>
+html,body{margin:0;padding:0;overflow:hidden;background:black}
+canvas{display:block}
+
+#ui{position:fixed;inset:0;z-index:10;pointer-events:none}
+#ui *{pointer-events:auto;touch-action:none}
+
+/* Crosshair */
+#crosshair{
+ position:fixed;top:50%;left:50%;
+ width:18px;height:18px;
+ transform:translate(-50%,-50%);
+}
+#crosshair:before,#crosshair:after{
+ content:"";position:absolute;background:white
+}
+#crosshair:before{width:2px;height:18px;left:8px}
+#crosshair:after{width:18px;height:2px;top:8px}
+
+/* HUD */
+#health{
+ position:fixed;top:20px;left:120px;
+ color:white;background:rgba(0,0,0,.5);
+ padding:6px 10px;border-radius:6px
+}
+
+button{
+ background:rgba(0,0,0,.65);
+ color:white;border:none
+}
+
+/* Fire */
+#fireBtn{
+ position:fixed;top:15px;left:15px;
+ width:90px;height:90px;
+ border-radius:50%;font-size:30px
+}
+
+/* Fullscreen */
+#fullscreenBtn{
+ position:fixed;top:15px;right:15px;
+ width:50px;height:50px;border-radius:50%
+}
+
+/* Settings */
+#settingsBtn{
+ position:fixed;top:15px;left:50%;
+ transform:translateX(-50%);
+ width:50px;height:50px;border-radius:50%
+}
+#settings{
+ position:fixed;top:80px;left:50%;
+ transform:translateX(-50%);
+ background:rgba(0,0,0,.8);
+ padding:10px;border-radius:8px;
+ color:white;display:none
+}
+
+/* Jump */
+#jumpBtn{
+ position:fixed;bottom:25px;right:25px;
+ width:90px;height:90px;border-radius:50%
+}
+
+/* Joystick */
+#joystick{
+ position:fixed;bottom:20px;left:20px;
+ width:120px;height:120px;
+ background:rgba(255,255,255,.15);
+ border-radius:50%
+}
+#stick{
+ position:absolute;left:40px;top:40px;
+ width:40px;height:40px;
+ background:rgba(255,255,255,.6);
+ border-radius:50%
+}
+
+/* Multiplayer */
+#mp{
+ position:fixed;bottom:20px;left:50%;
+ transform:translateX(-50%);
+ background:rgba(0,0,0,.7);
+ padding:8px;border-radius:8px;
+ color:white;font-size:14px
+}
+#mp input{width:90px}
+#mp button{margin-left:4px;padding:4px 6px;border-radius:6px}
+</style>
+</head>
+
+<body>
+
+<div id="crosshair"></div>
+
+<div id="ui">
+ <button id="fireBtn">🔫</button>
+ <div id="health">❤️ 100</div>
+ <button id="settingsBtn">⚙️</button>
+ <button id="fullscreenBtn">⛶</button>
+
+ <div id="settings">
+  Hassasiyet<br>
+  <input id="sens" type="range" min="0.001" max="0.01" step="0.001" value="0.003">
+ </div>
+
+ <div id="joystick"><div id="stick"></div></div>
+ <button id="jumpBtn">Zıpla</button>
+
+ <div id="mp">
+  ID: <span id="myId">...</span>
+  <button id="copyId">📋</button><br>
+  <input id="room" placeholder="Oda ID">
+  <button id="join">Katıl</button>
+ </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+
+<script>
+/* THREE */
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x87ceeb);
+
+const camera=new THREE.PerspectiveCamera(75,1,0.1,1000);
+camera.position.y=1.6;
+
+const renderer=new THREE.WebGLRenderer({antialias:true});
+document.body.appendChild(renderer.domElement);
+
+function resize(){
+ const w=innerWidth;
+ const h=visualViewport?visualViewport.height:innerHeight;
+ camera.aspect=w/h;
+ camera.updateProjectionMatrix();
+ renderer.setSize(w,h);
+}
+resize();
+
+scene.add(new THREE.HemisphereLight(0xffffff,0x444444,1));
+
+/* Floor */
+const floor=new THREE.Mesh(
+ new THREE.PlaneGeometry(200,200),
+ new THREE.MeshStandardMaterial({color:0x555555})
+);
+floor.rotation.x=-Math.PI/2;
+scene.add(floor);
+
+/* Player */
+const player=new THREE.Object3D();
+player.add(camera);
+scene.add(player);
+
+/* Gun */
+const gun=new THREE.Group();
+const body=new THREE.Mesh(
+ new THREE.BoxGeometry(0.25,0.15,0.6),
+ new THREE.MeshStandardMaterial({color:0x222222})
+);
+body.position.z=-0.3;
+const handle=new THREE.Mesh(
+ new THREE.BoxGeometry(0.12,0.25,0.15),
+ new THREE.MeshStandardMaterial({color:0x111111})
+);
+handle.position.set(0,-0.2,-0.2);
+gun.add(body,handle);
+gun.position.set(0.35,-0.35,-0.8);
+camera.add(gun);
+
+/* Other player */
+const other=new THREE.Mesh(
+ new THREE.BoxGeometry(1,2,1),
+ new THREE.MeshStandardMaterial({color:0x00ff00})
+);
+other.position.y=1;
+scene.add(other);
+
+/* Movement */
+let moveX=0,moveZ=0,yaw=0,pitch=0;
+let velY=0,grounded=false;
+const speed=0.07,gravity=-0.009,jumpForce=0.26;
+
+/* Joystick */
+let joyId=null;
+joystick.ontouchstart=e=>joyId=e.changedTouches[0].identifier;
+joystick.ontouchmove=e=>{
+ for(const t of e.touches){
+  if(t.identifier===joyId){
+   const r=joystick.getBoundingClientRect();
+   let x=t.clientX-r.left-60;
+   let y=t.clientY-r.top-60;
+   const d=Math.min(40,Math.hypot(x,y));
+   const a=Math.atan2(y,x);
+   moveX=Math.cos(a)*d/40;
+   moveZ=Math.sin(a)*d/40;
+   stick.style.left=40+moveX*40+"px";
+   stick.style.top =40+moveZ*40+"px";
+  }
+ }
+};
+joystick.ontouchend=()=>{
+ joyId=null;moveX=moveZ=0;
+ stick.style.left="40px";stick.style.top="40px";
+};
+
+/* Look */
+let lookId=null,lx=0,ly=0,sensitivity=0.003;
+sens.oninput=e=>sensitivity=parseFloat(e.target.value);
+
+addEventListener("touchstart",e=>{
+ for(const t of e.changedTouches){
+  if(!t.target.closest("#joystick") && lookId===null){
+   lookId=t.identifier;lx=t.clientX;ly=t.clientY;
+  }
+ }
+});
+addEventListener("touchmove",e=>{
+ for(const t of e.touches){
+  if(t.identifier===lookId){
+   yaw-=(t.clientX-lx)*sensitivity;
+   pitch-=(t.clientY-ly)*sensitivity;
+   pitch=Math.max(-1.5,Math.min(1.5,pitch));
+   lx=t.clientX;ly=t.clientY;
+  }
+ }
+});
+addEventListener("touchend",e=>{
+ for(const t of e.changedTouches){
+  if(t.identifier===lookId) lookId=null;
+ }
+});
+
+/* Jump */
+jumpBtn.ontouchstart=e=>{
+ e.preventDefault();
+ if(grounded){velY=jumpForce;grounded=false;}
+};
+
+/* Multiplayer */
+const peer=new Peer();
+let conn=null;
+
+peer.on("open",id=>myId.textContent=id);
+
+copyId.onclick=()=>{
+ const id=myId.textContent;
+ if(!id||id==="...")return;
+ navigator.clipboard.writeText(id);
+ copyId.textContent="✅";
+ setTimeout(()=>copyId.textContent="📋",1000);
+};
+
+join.onclick=()=>{
+ conn=peer.connect(room.value);
+ setupConn();
+};
+peer.on("connection",c=>{
+ conn=c;
+ setupConn();
+});
+function setupConn(){
+ conn.on("data",d=>{
+  other.position.set(d.x,d.y,d.z);
+  other.rotation.y=d.yaw;
+  if(d.fire){
+   other.material.color.set(0xff0000);
+   setTimeout(()=>other.material.color.set(0x00ff00),100);
+  }
+ });
+}
+
+/* Fire */
+fireBtn.ontouchstart=e=>{
+ e.preventDefault();
+ gun.rotation.x=-0.15;
+ setTimeout(()=>gun.rotation.x=0,80);
+ if(conn) conn.send({fire:true});
+};
+
+/* Fullscreen */
+fullscreenBtn.onclick=()=>{
+ if(!document.fullscreenElement)
+  document.documentElement.requestFullscreen();
+ else document.exitFullscreen();
+};
+
+/* Loop */
+function animate(){
+ requestAnimationFrame(animate);
+
+ player.rotation.y=yaw;
+ camera.rotation.x=pitch;
+
+ const f=new THREE.Vector3(Math.sin(yaw),0,Math.cos(yaw));
+ const r=new THREE.Vector3(Math.cos(yaw),0,-Math.sin(yaw));
+ player.position.add(f.multiplyScalar(moveZ*speed));
+ player.position.add(r.multiplyScalar(moveX*speed));
+
+ velY+=gravity;
+ player.position.y+=velY;
+ grounded=false;
+ if(player.position.y<=0){
+  player.position.y=0;velY=0;grounded=true;
+ }
+
+ if(conn){
+  conn.send({
+   x:player.position.x,
+   y:player.position.y,
+   z:player.position.z,
+   yaw
+  });
+ }
+
+ renderer.render(scene,camera);
+}
+animate();
+
+addEventListener("resize",resize);
+if(visualViewport)visualViewport.addEventListener("resize",resize);
+</script>
+</body>
+</html>
+
